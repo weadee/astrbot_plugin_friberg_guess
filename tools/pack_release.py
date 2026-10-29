@@ -30,7 +30,9 @@ def collect() -> list[Path]:
         ROOT / "_conf_schema.json",
         ROOT / "README.md",
         ROOT / "LICENSE",
+        ROOT / "requirements.txt",
     ]
+    files += sorted(ROOT.glob("assets/*"))
     files += sorted(ROOT.glob("data/*.json"))
     files += sorted(ROOT.glob("tests/*.py"))
     files += sorted(ROOT.glob("tools/*.py"))

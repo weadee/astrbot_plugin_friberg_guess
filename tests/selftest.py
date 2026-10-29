@@ -97,7 +97,7 @@ def _install_stubs(data_dir: Path) -> None:
     _mod("astrbot")
     _mod("astrbot.api", AstrBotConfig=dict, logger=logging.getLogger("stub"))
     _mod("astrbot.api.event", AstrMessageEvent=_AstrMessageEvent, MessageChain=_MessageChain, filter=_Filter)
-    _mod("astrbot.api.message_components", At=_Component, Plain=_Component)
+    _mod("astrbot.api.message_components", At=_Component, Image=_Component, Plain=_Component)
     _mod("astrbot.api.star", Context=_Context, Star=_Star)
     _mod("astrbot.core")
     _mod("astrbot.core.utils")

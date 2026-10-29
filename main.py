@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import At, Plain
+from astrbot.api.message_components import At, Image, Plain
 from astrbot.api.star import Context, Star
 
 PLUGIN_NAME = "astrbot_plugin_friberg_guess"
@@ -1330,6 +1330,7 @@ class Game:
     attempts: int = 8
     created_at: float = field(default_factory=time.time)
     guessed: list[str] = field(default_factory=list)
+    board_history: list[dict[str, Any]] = field(default_factory=list)  # 每次猜测时的判定快照
     revealed: list[str] = field(default_factory=list)
     task: asyncio.Task | None = None
     # 组队局：同一个群共享一个答案。solo 时这些字段都是空的
@@ -1370,6 +1371,7 @@ class Game:
             "attempts": self.attempts,
             "created_at": self.created_at,
             "guessed": self.guessed,
+            "board_history": self.board_history,
             "revealed": self.revealed,
             "mode": self.mode,
             "members": self.members,
@@ -1398,6 +1400,7 @@ class Game:
             attempts=int(data.get("attempts") or 8),
             created_at=data.get("created_at", time.time()),
             guessed=list(data.get("guessed") or []),
+            board_history=list(data.get("board_history") or []),
             revealed=list(data.get("revealed") or []),
             mode=data.get("mode", "solo"),
             members=list(data.get("members") or []),
@@ -2024,6 +2027,7 @@ class GuessProPlugin(Star):
         candidates = db.answer_pool(game.pool) or db.pool(game.pool)
         game.target = theme.title_of(random.choice(candidates))
         game.guessed = []
+        game.board_history = []
         game.guessed_by = []
         game.revealed = []
         game.hint_used = {}
@@ -2126,7 +2130,8 @@ class GuessProPlugin(Star):
 
     # ---------------- 猜测 ----------------
 
-    def _apply_guess(self, game: Game, guess: dict[str, Any], who_id: str = "", who_name: str = "") -> str:
+    def _apply_guess(self, game: Game, guess: dict[str, Any], who_id: str = "", who_name: str = "",
+                     snapshot: dict[str, Any] | None = None) -> str:
         theme = THEMES[game.theme]
         if game.is_team and not game.started:
             return "组队局还没开始，等房主发「开始」。"
@@ -2145,9 +2150,31 @@ class GuessProPlugin(Star):
             self.games.pop(game.key, None)
             return "这一局的答案数据丢了，重新开一局吧。"
 
+        # Older saves only contain names. Reconstruct missing rows once; new
+        # rows are persisted as snapshots so later data/config changes do not
+        # change an already displayed comparison.
+        while len(game.board_history) < len(game.guessed):
+            previous = game.guessed[len(game.board_history)]
+            player = db.get(previous)
+            old_cells = theme.judge(player, target) if player else []
+            game.board_history.append({
+                "name": previous,
+                "cells": [vars(c).copy() for c in old_cells] if player else [
+                    {"label": "历史数据", "value": "选手数据已缺失", "level": "unknown"}
+                ],
+            })
         game.guessed.append(title)
         cells = theme.judge(guess, target)
+        game.board_history.append({"name": title, "cells": [vars(c).copy() for c in cells]})
         board = render_board(theme, len(game.guessed), game.attempts, guess, target)
+        if snapshot is not None:
+            snapshot.update({
+                "title": f"{theme.command} · 第 {game.round_no} 局" if game.is_bo3 else theme.command,
+                "rows": [{"name": row["name"], "cells": [dict(c) for c in row["cells"]]}
+                         for row in game.board_history],
+                "status": f"第 {len(game.guessed)} / {game.attempts} 猜 · 绿色一致  黄色接近  红色不符 · 箭头指向答案",
+                "board": board,
+            })
 
         if all(c.level == "correct" for c in cells):
             if game.is_bo3:
@@ -2505,10 +2532,29 @@ class GuessProPlugin(Star):
                 return
 
         event.stop_event()
+        round_no, target_title = game.round_no, game.target
+        snapshot: dict[str, Any] = {}
         async with self._lock:
+            # A prior queued message may already have finished or advanced this round.
+            if self.games.get(game.key) is not game or game.round_no != round_no or game.target != target_title:
+                return
             text = self._apply_guess(
-                game, candidates[0], event.get_sender_id(), event.get_sender_name() or ""
+                game, candidates[0], event.get_sender_id(), event.get_sender_name() or "", snapshot
             )
+        if snapshot:
+            try:
+                from .image_renderer import render_board_image
+                png = await asyncio.to_thread(render_board_image, snapshot["title"], snapshot["rows"], snapshot["status"])
+                # Keep turn, result and stats text, but omit the old single-row board.
+                detail = text.removeprefix(snapshot["board"]).lstrip("\n")
+                chain = self._with_at(event, detail) if detail else []
+                chain.append(Image.fromBytes(png))
+            except Exception:
+                logger.exception("[%s] 图片棋盘生成失败，回退文字", PLUGIN_NAME)
+            else:
+                # A send failure may have an uncertain outcome: do not send twice.
+                await event.send(event.chain_result(chain))
+                return
         await event.send(event.chain_result(self._with_at(event, text)))
 
     async def terminate(self) -> None:
